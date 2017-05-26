@@ -55,7 +55,7 @@ func (r ReferenceType) String() string {
 type ReferenceName string
 
 func (r ReferenceName) String() string {
-	return string(r)
+	return strings.Replace(string(r), `\`, `/`, -1)
 }
 
 // Short returns the short name of a ReferenceName
