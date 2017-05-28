@@ -6,15 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"net"
 	"os"
 	"os/user"
 	"path/filepath"
 
+	"github.com/xanzy/ssh-agent"
 	"gopkg.in/src-d/go-git.v4/plumbing/transport"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
@@ -189,19 +188,14 @@ func NewSSHAgentAuth(u string) (AuthMethod, error) {
 		u = usr.Username
 	}
 
-	sshAgentAddr := os.Getenv("SSH_AUTH_SOCK")
-	if sshAgentAddr == "" {
-		return nil, ErrEmptySSHAgentAddr
-	}
-
-	pipe, err := net.Dial("unix", sshAgentAddr)
+	a, _, err := sshagent.New()
 	if err != nil {
-		return nil, fmt.Errorf("error connecting to SSH agent: %q", err)
+		return nil, fmt.Errorf("error creating SSH agent: %q", err)
 	}
 
 	return &PublicKeysCallback{
 		User:     u,
-		Callback: agent.NewClient(pipe).Signers,
+		Callback: a.Signers,
 	}, nil
 }
 
