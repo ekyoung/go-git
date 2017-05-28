@@ -3,7 +3,6 @@ package ssh
 import (
 	"crypto/x509"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -18,8 +17,6 @@ import (
 )
 
 const DefaultUsername = "git"
-
-var ErrEmptySSHAgentAddr = errors.New("SSH_AUTH_SOCK env variable is required")
 
 // AuthMethod is the interface all auth methods for the ssh client
 // must implement. The clientConfig method returns the ssh client

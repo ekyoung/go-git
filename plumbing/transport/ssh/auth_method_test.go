@@ -94,18 +94,9 @@ func (s *SuiteCommon) TestPublicKeysCallbackString(c *C) {
 	c.Assert(a.String(), Equals, fmt.Sprintf("user: test, name: %s", PublicKeysCallbackName))
 }
 func (s *SuiteCommon) TestNewSSHAgentAuth(c *C) {
-	addr := os.Getenv("SSH_AUTH_SOCK")
-	err := os.Unsetenv("SSH_AUTH_SOCK")
+	auth, err := NewSSHAgentAuth("foo")
 	c.Assert(err, IsNil)
-
-	defer func() {
-		err := os.Setenv("SSH_AUTH_SOCK", addr)
-		c.Assert(err, IsNil)
-	}()
-
-	k, err := NewSSHAgentAuth("foo")
-	c.Assert(k, IsNil)
-	c.Assert(err, Equals, ErrEmptySSHAgentAddr)
+	c.Assert(auth, NotNil)
 }
 
 func (*SuiteCommon) TestNewPublicKeys(c *C) {
