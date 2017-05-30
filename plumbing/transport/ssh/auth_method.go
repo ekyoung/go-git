@@ -9,9 +9,9 @@ import (
 	"os/user"
 	"path/filepath"
 
-	"github.com/xanzy/ssh-agent"
 	"gopkg.in/src-d/go-git.v4/plumbing/transport"
 
+	"github.com/xanzy/ssh-agent"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
