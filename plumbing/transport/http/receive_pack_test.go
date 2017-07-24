@@ -1,20 +1,22 @@
-package git
+package http
 
 import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
+	"net/http"
+	"net/http/cgi"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/src-d/go-git-fixtures"
 	"gopkg.in/src-d/go-git.v4/plumbing/transport"
 	"gopkg.in/src-d/go-git.v4/plumbing/transport/test"
 
+	"github.com/src-d/go-git-fixtures"
 	. "gopkg.in/check.v1"
 )
 
@@ -22,8 +24,7 @@ type ReceivePackSuite struct {
 	test.ReceivePackSuite
 	fixtures.Suite
 
-	base   string
-	daemon *exec.Cmd
+	base string
 }
 
 var _ = Suite(&ReceivePackSuite{})
@@ -34,7 +35,7 @@ func (s *ReceivePackSuite) SetUpTest(c *C) {
 	port, err := freePort()
 	c.Assert(err, IsNil)
 
-	base, err := ioutil.TempDir(os.TempDir(), "go-git-daemon-test")
+	base, err := ioutil.TempDir(os.TempDir(), "go-git-http-backend-test")
 	c.Assert(err, IsNil)
 	s.base = base
 
@@ -48,7 +49,7 @@ func (s *ReceivePackSuite) SetUpTest(c *C) {
 	err = os.Rename(dotgit, filepath.Join(interpolatedBase, "basic.git"))
 	c.Assert(err, IsNil)
 
-	ep, err := transport.NewEndpoint(fmt.Sprintf("git://localhost:%d/basic.git", port))
+	ep, err := transport.NewEndpoint(fmt.Sprintf("http://localhost:%d/basic.git", port))
 	c.Assert(err, IsNil)
 	s.ReceivePackSuite.Endpoint = ep
 
@@ -57,54 +58,31 @@ func (s *ReceivePackSuite) SetUpTest(c *C) {
 	err = os.Rename(dotgit, filepath.Join(interpolatedBase, "empty.git"))
 	c.Assert(err, IsNil)
 
-	ep, err = transport.NewEndpoint(fmt.Sprintf("git://localhost:%d/empty.git", port))
+	ep, err = transport.NewEndpoint(fmt.Sprintf("http://localhost:%d/empty.git", port))
 	c.Assert(err, IsNil)
 	s.ReceivePackSuite.EmptyEndpoint = ep
 
-	ep, err = transport.NewEndpoint(fmt.Sprintf("git://localhost:%d/non-existent.git", port))
+	ep, err = transport.NewEndpoint(fmt.Sprintf("http://localhost:%d/non-existent.git", port))
 	c.Assert(err, IsNil)
 	s.ReceivePackSuite.NonExistentEndpoint = ep
 
-	s.daemon = exec.Command(
-		"git",
-		"daemon",
-		fmt.Sprintf("--base-path=%s", base),
-		"--export-all",
-		"--enable=receive-pack",
-		"--reuseaddr",
-		fmt.Sprintf("--port=%d", port),
-		// Use interpolated paths to validate that clients are specifying
-		// host and port properly.
-		// Note that some git versions (e.g. v2.11.0) had a bug that prevented
-		// the use of repository paths containing colons (:), so we use
-		// underscore (_) instead of colon in the interpolation.
-		// See https://github.com/git/git/commit/fe050334074c5132d01e1df2c1b9a82c9b8d394c
-		fmt.Sprintf("--interpolated-path=%s/%%H_%%P%%D", base),
-		// Unless max-connections is limited to 1, a git-receive-pack
-		// might not be seen by a subsequent operation.
-		"--max-connections=1",
-		// Whitelist required for interpolated paths.
-		fmt.Sprintf("%s/%s", interpolatedBase, "basic.git"),
-		fmt.Sprintf("%s/%s", interpolatedBase, "empty.git"),
-	)
-
-	// Environment must be inherited in order to acknowledge GIT_EXEC_PATH if set.
-	s.daemon.Env = os.Environ()
-
-	err = s.daemon.Start()
+	cmd := exec.Command("git", "--exec-path")
+	out, err := cmd.CombinedOutput()
 	c.Assert(err, IsNil)
+	p := filepath.Join(strings.Trim(string(out), "\n"), "git-http-backend")
 
-	// Connections might be refused if we start sending request too early.
-	time.Sleep(time.Millisecond * 500)
+	h := &cgi.Handler{
+		Path: p,
+		Env:  []string{"GIT_HTTP_EXPORT_ALL=true", fmt.Sprintf("GIT_PROJECT_ROOT=%s", interpolatedBase)},
+	}
+
+	go func() {
+		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), h))
+	}()
 }
 
 func (s *ReceivePackSuite) TearDownTest(c *C) {
-	err := s.daemon.Process.Signal(os.Kill)
-	c.Assert(err, IsNil)
-
-	_ = s.daemon.Wait()
-
-	err = os.RemoveAll(s.base)
+	err := os.RemoveAll(s.base)
 	c.Assert(err, IsNil)
 }
 
@@ -125,7 +103,9 @@ func freePort() (int, error) {
 const bareConfig = `[core]
 repositoryformatversion = 0
 filemode = true
-bare = true`
+bare = true
+[http]
+receivepack = true`
 
 func prepareRepo(c *C, path string) {
 	// git-receive-pack refuses to update refs/heads/master on non-bare repo

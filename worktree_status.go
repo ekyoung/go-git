@@ -24,16 +24,18 @@ var ErrDestinationExists = errors.New("destination exists")
 
 // Status returns the working tree status.
 func (w *Worktree) Status() (Status, error) {
-	ref, err := w.r.Head()
-	if err == plumbing.ErrReferenceNotFound {
-		return make(Status, 0), nil
-	}
+	var hash plumbing.Hash
 
-	if err != nil {
+	ref, err := w.r.Head()
+	if err != nil && err != plumbing.ErrReferenceNotFound {
 		return nil, err
 	}
 
-	return w.status(ref.Hash())
+	if err == nil {
+		hash = ref.Hash()
+	}
+
+	return w.status(hash)
 }
 
 func (w *Worktree) status(commit plumbing.Hash) (Status, error) {
@@ -67,8 +69,6 @@ func (w *Worktree) status(commit plumbing.Hash) (Status, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	right = w.excludeIgnoredChanges(right)
 
 	for _, ch := range right {
 		a, err := ch.Action()
@@ -117,7 +117,11 @@ func (w *Worktree) diffStagingWithWorktree() (merkletrie.Changes, error) {
 	}
 
 	to := filesystem.NewRootNode(w.fs, submodules)
-	return merkletrie.DiffTree(from, to, diffTreeIsEquals)
+	res, err := merkletrie.DiffTree(from, to, diffTreeIsEquals)
+	if err == nil {
+		res = w.excludeIgnoredChanges(res)
+	}
+	return res, err
 }
 
 func (w *Worktree) excludeIgnoredChanges(changes merkletrie.Changes) merkletrie.Changes {
@@ -180,19 +184,22 @@ func (w *Worktree) diffCommitWithStaging(commit plumbing.Hash, reverse bool) (me
 		return nil, err
 	}
 
-	c, err := w.r.CommitObject(commit)
-	if err != nil {
-		return nil, err
-	}
+	var from noder.Noder
+	if !commit.IsZero() {
+		c, err := w.r.CommitObject(commit)
+		if err != nil {
+			return nil, err
+		}
 
-	t, err := c.Tree()
-	if err != nil {
-		return nil, err
+		t, err := c.Tree()
+		if err != nil {
+			return nil, err
+		}
+
+		from = object.NewTreeRootNode(t)
 	}
 
 	to := mindex.NewRootNode(idx)
-	from := object.NewTreeRootNode(t)
-
 	if reverse {
 		return merkletrie.DiffTree(to, from, diffTreeIsEquals)
 	}

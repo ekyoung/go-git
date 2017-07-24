@@ -1,10 +1,12 @@
 package git
 
 import (
+	"bytes"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 
+	"gopkg.in/src-d/go-git.v4/config"
 	"gopkg.in/src-d/go-git.v4/plumbing"
 	"gopkg.in/src-d/go-git.v4/plumbing/filemode"
 	"gopkg.in/src-d/go-git.v4/plumbing/format/index"
@@ -25,9 +27,165 @@ type WorktreeSuite struct {
 var _ = Suite(&WorktreeSuite{})
 
 func (s *WorktreeSuite) SetUpTest(c *C) {
-	s.buildBasicRepository(c)
-	// the index is removed if not the Repository will be not clean
-	c.Assert(s.Repository.Storer.SetIndex(&index.Index{Version: 2}), IsNil)
+	f := fixtures.Basic().One()
+	s.Repository = s.NewRepositoryWithEmptyWorktree(f)
+}
+
+func (s *WorktreeSuite) TestPullCheckout(c *C) {
+	fs := memfs.New()
+	r, _ := Init(memory.NewStorage(), fs)
+	r.CreateRemote(&config.RemoteConfig{
+		Name: DefaultRemoteName,
+		URL:  s.GetBasicLocalRepositoryURL(),
+	})
+
+	w, err := r.Worktree()
+	c.Assert(err, IsNil)
+
+	err = w.Pull(&PullOptions{})
+	c.Assert(err, IsNil)
+
+	fi, err := fs.ReadDir("")
+	c.Assert(err, IsNil)
+	c.Assert(fi, HasLen, 8)
+}
+
+func (s *WorktreeSuite) TestPullUpdateReferencesIfNeeded(c *C) {
+	r, _ := Init(memory.NewStorage(), memfs.New())
+	r.CreateRemote(&config.RemoteConfig{
+		Name: DefaultRemoteName,
+		URL:  s.GetBasicLocalRepositoryURL(),
+	})
+
+	err := r.Fetch(&FetchOptions{})
+	c.Assert(err, IsNil)
+
+	_, err = r.Reference("refs/heads/master", false)
+	c.Assert(err, NotNil)
+
+	w, err := r.Worktree()
+	c.Assert(err, IsNil)
+
+	err = w.Pull(&PullOptions{})
+	c.Assert(err, IsNil)
+
+	head, err := r.Reference(plumbing.HEAD, true)
+	c.Assert(err, IsNil)
+	c.Assert(head.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
+
+	branch, err := r.Reference("refs/heads/master", false)
+	c.Assert(err, IsNil)
+	c.Assert(branch.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
+
+	err = w.Pull(&PullOptions{})
+	c.Assert(err, Equals, NoErrAlreadyUpToDate)
+}
+
+func (s *WorktreeSuite) TestPullInSingleBranch(c *C) {
+	r, _ := Init(memory.NewStorage(), memfs.New())
+	err := r.clone(&CloneOptions{
+		URL:          s.GetBasicLocalRepositoryURL(),
+		SingleBranch: true,
+	})
+
+	c.Assert(err, IsNil)
+
+	w, err := r.Worktree()
+	c.Assert(err, IsNil)
+
+	err = w.Pull(&PullOptions{})
+	c.Assert(err, Equals, NoErrAlreadyUpToDate)
+
+	branch, err := r.Reference("refs/heads/master", false)
+	c.Assert(err, IsNil)
+	c.Assert(branch.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
+
+	branch, err = r.Reference("refs/remotes/foo/branch", false)
+	c.Assert(err, NotNil)
+
+	storage := r.Storer.(*memory.Storage)
+	c.Assert(storage.Objects, HasLen, 28)
+}
+
+func (s *WorktreeSuite) TestPullProgress(c *C) {
+	r, _ := Init(memory.NewStorage(), memfs.New())
+
+	r.CreateRemote(&config.RemoteConfig{
+		Name: DefaultRemoteName,
+		URL:  s.GetBasicLocalRepositoryURL(),
+	})
+
+	w, err := r.Worktree()
+	c.Assert(err, IsNil)
+
+	buf := bytes.NewBuffer(nil)
+	err = w.Pull(&PullOptions{
+		Progress: buf,
+	})
+
+	c.Assert(err, IsNil)
+	c.Assert(buf.Len(), Not(Equals), 0)
+}
+
+func (s *WorktreeSuite) TestPullProgressWithRecursion(c *C) {
+	path := fixtures.ByTag("submodule").One().Worktree().Root()
+
+	dir, err := ioutil.TempDir("", "plain-clone-submodule")
+	c.Assert(err, IsNil)
+	defer os.RemoveAll(dir)
+
+	r, _ := PlainInit(dir, false)
+	r.CreateRemote(&config.RemoteConfig{
+		Name: DefaultRemoteName,
+		URL:  path,
+	})
+
+	w, err := r.Worktree()
+	c.Assert(err, IsNil)
+
+	err = w.Pull(&PullOptions{
+		RecurseSubmodules: DefaultSubmoduleRecursionDepth,
+	})
+	c.Assert(err, IsNil)
+
+	cfg, err := r.Config()
+	c.Assert(cfg.Submodules, HasLen, 2)
+}
+
+func (s *RepositorySuite) TestPullAdd(c *C) {
+	path := fixtures.Basic().ByTag("worktree").One().Worktree().Root()
+
+	r, err := Clone(memory.NewStorage(), memfs.New(), &CloneOptions{
+		URL: filepath.Join(path, ".git"),
+	})
+
+	c.Assert(err, IsNil)
+
+	storage := r.Storer.(*memory.Storage)
+	c.Assert(storage.Objects, HasLen, 28)
+
+	branch, err := r.Reference("refs/heads/master", false)
+	c.Assert(err, IsNil)
+	c.Assert(branch.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
+
+	ExecuteOnPath(c, path,
+		"touch foo",
+		"git add foo",
+		"git commit -m foo foo",
+	)
+
+	w, err := r.Worktree()
+	c.Assert(err, IsNil)
+
+	err = w.Pull(&PullOptions{RemoteName: "origin"})
+	c.Assert(err, IsNil)
+
+	// the commit command has introduced a new commit, tree and blob
+	c.Assert(storage.Objects, HasLen, 31)
+
+	branch, err = r.Reference("refs/heads/master", false)
+	c.Assert(err, IsNil)
+	c.Assert(branch.Hash().String(), Not(Equals), "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
 }
 
 func (s *WorktreeSuite) TestCheckout(c *C) {
@@ -87,13 +245,9 @@ func (s *WorktreeSuite) TestCheckoutSymlink(c *C) {
 
 func (s *WorktreeSuite) TestCheckoutSubmodule(c *C) {
 	url := "https://github.com/git-fixtures/submodule.git"
-	w := &Worktree{
-		r:  s.NewRepository(fixtures.ByURL(url).One()),
-		fs: memfs.New(),
-	}
+	r := s.NewRepositoryWithEmptyWorktree(fixtures.ByURL(url).One())
 
-	// we delete the index, since the fixture comes with a real index
-	err := w.r.Storer.SetIndex(&index.Index{Version: 2})
+	w, err := r.Worktree()
 	c.Assert(err, IsNil)
 
 	err = w.Checkout(&CheckoutOptions{})
@@ -106,16 +260,11 @@ func (s *WorktreeSuite) TestCheckoutSubmodule(c *C) {
 
 func (s *WorktreeSuite) TestCheckoutSubmoduleInitialized(c *C) {
 	url := "https://github.com/git-fixtures/submodule.git"
-	w := &Worktree{
-		r:  s.NewRepository(fixtures.ByURL(url).One()),
-		fs: memfs.New(),
-	}
+	r := s.NewRepository(fixtures.ByURL(url).One())
 
-	err := w.r.Storer.SetIndex(&index.Index{Version: 2})
+	w, err := r.Worktree()
 	c.Assert(err, IsNil)
 
-	err = w.Checkout(&CheckoutOptions{})
-	c.Assert(err, IsNil)
 	sub, err := w.Submodules()
 	c.Assert(err, IsNil)
 
@@ -183,60 +332,102 @@ func (s *WorktreeSuite) TestCheckoutIndexOS(c *C) {
 	c.Assert(idx.Entries[0].GID, Not(Equals), uint32(0))
 }
 
-func (s *WorktreeSuite) TestCheckoutChange(c *C) {
-	fs := memfs.New()
+func (s *WorktreeSuite) TestCheckoutBranch(c *C) {
 	w := &Worktree{
 		r:  s.Repository,
-		fs: fs,
+		fs: memfs.New(),
 	}
 
-	err := w.Checkout(&CheckoutOptions{})
-	c.Assert(err, IsNil)
-
-	head, err := w.r.Head()
-	c.Assert(err, IsNil)
-	c.Assert(head.Name().String(), Equals, "refs/heads/master")
-
-	status, err := w.Status()
-	c.Assert(err, IsNil)
-	c.Assert(status.IsClean(), Equals, true)
-
-	_, err = fs.Stat("README")
-	c.Assert(err, Equals, os.ErrNotExist)
-	_, err = fs.Stat("vendor")
-	c.Assert(err, Equals, nil)
-
-	err = w.Checkout(&CheckoutOptions{
+	err := w.Checkout(&CheckoutOptions{
 		Branch: "refs/heads/branch",
 	})
 	c.Assert(err, IsNil)
 
-	status, err = w.Status()
-	c.Assert(err, IsNil)
-	c.Assert(status.IsClean(), Equals, true)
-
-	_, err = fs.Stat("README")
-	c.Assert(err, Equals, nil)
-
-	_, err = fs.Stat("vendor")
-	c.Assert(err, Equals, os.ErrNotExist)
-
-	head, err = w.r.Head()
+	head, err := w.r.Head()
 	c.Assert(err, IsNil)
 	c.Assert(head.Name().String(), Equals, "refs/heads/branch")
+
+	status, err := w.Status()
+	c.Assert(err, IsNil)
+	c.Assert(status.IsClean(), Equals, true)
+}
+
+func (s *WorktreeSuite) TestCheckoutCreateWithHash(c *C) {
+	w := &Worktree{
+		r:  s.Repository,
+		fs: memfs.New(),
+	}
+
+	err := w.Checkout(&CheckoutOptions{
+		Create: true,
+		Branch: "refs/heads/foo",
+		Hash:   plumbing.NewHash("35e85108805c84807bc66a02d91535e1e24b38b9"),
+	})
+	c.Assert(err, IsNil)
+
+	head, err := w.r.Head()
+	c.Assert(err, IsNil)
+	c.Assert(head.Name().String(), Equals, "refs/heads/foo")
+	c.Assert(head.Hash(), Equals, plumbing.NewHash("35e85108805c84807bc66a02d91535e1e24b38b9"))
+
+	status, err := w.Status()
+	c.Assert(err, IsNil)
+	c.Assert(status.IsClean(), Equals, true)
+}
+
+func (s *WorktreeSuite) TestCheckoutCreate(c *C) {
+	w := &Worktree{
+		r:  s.Repository,
+		fs: memfs.New(),
+	}
+
+	err := w.Checkout(&CheckoutOptions{
+		Create: true,
+		Branch: "refs/heads/foo",
+	})
+	c.Assert(err, IsNil)
+
+	head, err := w.r.Head()
+	c.Assert(err, IsNil)
+	c.Assert(head.Name().String(), Equals, "refs/heads/foo")
+	c.Assert(head.Hash(), Equals, plumbing.NewHash("6ecf0ef2c2dffb796033e5a02219af86ec6584e5"))
+
+	status, err := w.Status()
+	c.Assert(err, IsNil)
+	c.Assert(status.IsClean(), Equals, true)
+}
+
+func (s *WorktreeSuite) TestCheckoutBranchAndHash(c *C) {
+	w := &Worktree{
+		r:  s.Repository,
+		fs: memfs.New(),
+	}
+
+	err := w.Checkout(&CheckoutOptions{
+		Branch: "refs/heads/foo",
+		Hash:   plumbing.NewHash("35e85108805c84807bc66a02d91535e1e24b38b9"),
+	})
+
+	c.Assert(err, Equals, ErrBranchHashExclusive)
+}
+
+func (s *WorktreeSuite) TestCheckoutCreateMissingBranch(c *C) {
+	w := &Worktree{
+		r:  s.Repository,
+		fs: memfs.New(),
+	}
+
+	err := w.Checkout(&CheckoutOptions{
+		Create: true,
+	})
+
+	c.Assert(err, Equals, ErrCreateRequiresBranch)
 }
 
 func (s *WorktreeSuite) TestCheckoutTag(c *C) {
 	f := fixtures.ByTag("tags").One()
-
-	fs := memfs.New()
-	w := &Worktree{
-		r:  s.NewRepository(f),
-		fs: fs,
-	}
-
-	// we delete the index, since the fixture comes with a real index
-	err := w.r.Storer.SetIndex(&index.Index{Version: 2})
+	r := s.NewRepositoryWithEmptyWorktree(f)
+	w, err := r.Worktree()
 	c.Assert(err, IsNil)
 
 	err = w.Checkout(&CheckoutOptions{})
@@ -282,14 +473,9 @@ func (s *WorktreeSuite) TestCheckoutBisectSubmodules(c *C) {
 // checking every commit over the previous commit
 func (s *WorktreeSuite) testCheckoutBisect(c *C, url string) {
 	f := fixtures.ByURL(url).One()
+	r := s.NewRepositoryWithEmptyWorktree(f)
 
-	w := &Worktree{
-		r:  s.NewRepository(f),
-		fs: memfs.New(),
-	}
-
-	// we delete the index, since the fixture comes with a real index
-	err := w.r.Storer.SetIndex(&index.Index{Version: 2})
+	w, err := r.Worktree()
 	c.Assert(err, IsNil)
 
 	iter, err := w.r.Log(&LogOptions{})
@@ -305,6 +491,35 @@ func (s *WorktreeSuite) testCheckoutBisect(c *C, url string) {
 
 		return nil
 	})
+}
+
+func (s *WorktreeSuite) TestCheckoutWithGitignore(c *C) {
+	fs := memfs.New()
+	w := &Worktree{
+		r:  s.Repository,
+		fs: fs,
+	}
+
+	err := w.Checkout(&CheckoutOptions{})
+	c.Assert(err, IsNil)
+
+	f, _ := fs.Create("file")
+	f.Close()
+
+	err = w.Checkout(&CheckoutOptions{})
+	c.Assert(err.Error(), Equals, "worktree contains unstagged changes")
+
+	f, _ = fs.Create(".gitignore")
+	f.Write([]byte("file"))
+	f.Close()
+
+	err = w.Checkout(&CheckoutOptions{})
+	c.Assert(err.Error(), Equals, "worktree contains unstagged changes")
+
+	w.Add(".gitignore")
+
+	err = w.Checkout(&CheckoutOptions{})
+	c.Assert(err, IsNil)
 }
 
 func (s *WorktreeSuite) TestStatus(c *C) {
@@ -335,6 +550,25 @@ func (s *WorktreeSuite) TestStatusEmpty(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(status.IsClean(), Equals, true)
 	c.Assert(status, NotNil)
+}
+
+func (s *WorktreeSuite) TestStatusEmptyDirty(c *C) {
+	fs := memfs.New()
+	err := util.WriteFile(fs, "foo", []byte("foo"), 0755)
+	c.Assert(err, IsNil)
+
+	storage := memory.NewStorage()
+
+	r, err := Init(storage, fs)
+	c.Assert(err, IsNil)
+
+	w, err := r.Worktree()
+	c.Assert(err, IsNil)
+
+	status, err := w.Status()
+	c.Assert(err, IsNil)
+	c.Assert(status.IsClean(), Equals, false)
+	c.Assert(status, HasLen, 1)
 }
 
 func (s *WorktreeSuite) TestReset(c *C) {
@@ -458,10 +692,7 @@ func (s *WorktreeSuite) TestStatusModified(c *C) {
 }
 
 func (s *WorktreeSuite) TestStatusIgnored(c *C) {
-	dir, _ := ioutil.TempDir("", "status")
-	defer os.RemoveAll(dir)
-
-	fs := osfs.New(filepath.Join(dir, "worktree"))
+	fs := memfs.New()
 	w := &Worktree{
 		r:  s.Repository,
 		fs: fs,

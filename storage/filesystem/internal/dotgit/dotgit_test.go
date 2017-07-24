@@ -373,6 +373,7 @@ func (s *SuiteDotGit) TestObjectPackIdx(c *C) {
 	idx, err := dir.ObjectPackIdx(f.PackfileHash)
 	c.Assert(err, IsNil)
 	c.Assert(filepath.Ext(idx.Name()), Equals, ".idx")
+	c.Assert(idx.Close(), IsNil)
 }
 
 func (s *SuiteDotGit) TestObjectPackNotFound(c *C) {
@@ -466,5 +467,5 @@ func (s *SuiteDotGit) TestSubmodules(c *C) {
 
 	m, err := dir.Module("basic")
 	c.Assert(err, IsNil)
-	c.Assert(strings.HasSuffix(m.Root(), m.Join(".git", "module", "basic")), Equals, true)
+	c.Assert(strings.HasSuffix(m.Root(), m.Join(".git", "modules", "basic")), Equals, true)
 }

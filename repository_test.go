@@ -20,6 +20,7 @@ import (
 	. "gopkg.in/check.v1"
 	"gopkg.in/src-d/go-billy.v3/memfs"
 	"gopkg.in/src-d/go-billy.v3/osfs"
+	"gopkg.in/src-d/go-billy.v3/util"
 )
 
 type RepositorySuite struct {
@@ -425,6 +426,19 @@ func (s *RepositorySuite) TestFetch(c *C) {
 	c.Assert(branch.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
 }
 
+func (s *RepositorySuite) TestCloneWithProgress(c *C) {
+	fs := memfs.New()
+
+	buf := bytes.NewBuffer(nil)
+	_, err := Clone(memory.NewStorage(), fs, &CloneOptions{
+		URL:      s.GetBasicLocalRepositoryURL(),
+		Progress: buf,
+	})
+
+	c.Assert(err, IsNil)
+	c.Assert(buf.Len(), Not(Equals), 0)
+}
+
 func (s *RepositorySuite) TestCloneDeep(c *C) {
 	fs := memfs.New()
 	r, _ := Init(memory.NewStorage(), fs)
@@ -574,197 +588,72 @@ func (s *RepositorySuite) TestCloneDetachedHEAD(c *C) {
 	c.Assert(head.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
 }
 
-func (s *RepositorySuite) TestPullCheckout(c *C) {
-	fs := memfs.New()
-	r, _ := Init(memory.NewStorage(), fs)
-	r.CreateRemote(&config.RemoteConfig{
-		Name: DefaultRemoteName,
-		URL:  s.GetBasicLocalRepositoryURL(),
-	})
-
-	err := r.Pull(&PullOptions{})
+func (s *RepositorySuite) TestPush(c *C) {
+	url := c.MkDir()
+	server, err := PlainInit(url, true)
 	c.Assert(err, IsNil)
 
-	fi, err := fs.ReadDir("")
-	c.Assert(err, IsNil)
-	c.Assert(fi, HasLen, 8)
-}
-
-func (s *RepositorySuite) TestCloneWithProgress(c *C) {
-	fs := memfs.New()
-
-	buf := bytes.NewBuffer(nil)
-	_, err := Clone(memory.NewStorage(), fs, &CloneOptions{
-		URL:      s.GetBasicLocalRepositoryURL(),
-		Progress: buf,
-	})
-
-	c.Assert(err, IsNil)
-	c.Assert(buf.Len(), Not(Equals), 0)
-}
-
-func (s *RepositorySuite) TestPullUpdateReferencesIfNeeded(c *C) {
-	r, _ := Init(memory.NewStorage(), nil)
-	r.CreateRemote(&config.RemoteConfig{
-		Name: DefaultRemoteName,
-		URL:  s.GetBasicLocalRepositoryURL(),
-	})
-
-	err := r.Fetch(&FetchOptions{})
-	c.Assert(err, IsNil)
-
-	_, err = r.Reference("refs/heads/master", false)
-	c.Assert(err, NotNil)
-
-	err = r.Pull(&PullOptions{})
-	c.Assert(err, IsNil)
-
-	head, err := r.Reference(plumbing.HEAD, true)
-	c.Assert(err, IsNil)
-	c.Assert(head.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
-
-	branch, err := r.Reference("refs/heads/master", false)
-	c.Assert(err, IsNil)
-	c.Assert(branch.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
-
-	err = r.Pull(&PullOptions{})
-	c.Assert(err, Equals, NoErrAlreadyUpToDate)
-}
-
-func (s *RepositorySuite) TestPullSingleBranch(c *C) {
-	r, _ := Init(memory.NewStorage(), nil)
-	err := r.clone(&CloneOptions{
-		URL:          s.GetBasicLocalRepositoryURL(),
-		SingleBranch: true,
-	})
-
-	c.Assert(err, IsNil)
-
-	err = r.Pull(&PullOptions{})
-	c.Assert(err, Equals, NoErrAlreadyUpToDate)
-
-	branch, err := r.Reference("refs/heads/master", false)
-	c.Assert(err, IsNil)
-	c.Assert(branch.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
-
-	branch, err = r.Reference("refs/remotes/foo/branch", false)
-	c.Assert(err, NotNil)
-
-	storage := r.Storer.(*memory.Storage)
-	c.Assert(storage.Objects, HasLen, 28)
-}
-
-func (s *RepositorySuite) TestPullProgress(c *C) {
-	r, _ := Init(memory.NewStorage(), nil)
-
-	r.CreateRemote(&config.RemoteConfig{
-		Name: DefaultRemoteName,
-		URL:  s.GetBasicLocalRepositoryURL(),
-	})
-
-	buf := bytes.NewBuffer(nil)
-	err := r.Pull(&PullOptions{
-		Progress: buf,
-	})
-
-	c.Assert(err, IsNil)
-	c.Assert(buf.Len(), Not(Equals), 0)
-}
-
-func (s *RepositorySuite) TestPullProgressWithRecursion(c *C) {
-	path := fixtures.ByTag("submodule").One().Worktree().Root()
-
-	dir, err := ioutil.TempDir("", "plain-clone-submodule")
-	c.Assert(err, IsNil)
-	defer os.RemoveAll(dir)
-
-	r, _ := PlainInit(dir, false)
-	r.CreateRemote(&config.RemoteConfig{
-		Name: DefaultRemoteName,
-		URL:  path,
-	})
-
-	err = r.Pull(&PullOptions{
-		RecurseSubmodules: DefaultSubmoduleRecursionDepth,
-	})
-	c.Assert(err, IsNil)
-
-	cfg, err := r.Config()
-	c.Assert(cfg.Submodules, HasLen, 2)
-}
-
-func (s *RepositorySuite) TestPullAdd(c *C) {
-	path := fixtures.Basic().ByTag("worktree").One().Worktree().Root()
-
-	r, err := Clone(memory.NewStorage(), nil, &CloneOptions{
-		URL: filepath.Join(path, ".git"),
-	})
-
-	c.Assert(err, IsNil)
-
-	storage := r.Storer.(*memory.Storage)
-	c.Assert(storage.Objects, HasLen, 28)
-
-	branch, err := r.Reference("refs/heads/master", false)
-	c.Assert(err, IsNil)
-	c.Assert(branch.Hash().String(), Equals, "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
-
-	ExecuteOnPath(c, path,
-		"touch foo",
-		"git add foo",
-		"git commit -m foo foo",
-	)
-
-	err = r.Pull(&PullOptions{RemoteName: "origin"})
-	c.Assert(err, IsNil)
-
-	// the commit command has introduced a new commit, tree and blob
-	c.Assert(storage.Objects, HasLen, 31)
-
-	branch, err = r.Reference("refs/heads/master", false)
-	c.Assert(err, IsNil)
-	c.Assert(branch.Hash().String(), Not(Equals), "6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
-}
-
-func (s *RepositorySuite) TestPushToEmptyRepository(c *C) {
-	srcFs := fixtures.Basic().One().DotGit()
-	sto, err := filesystem.NewStorage(srcFs)
-	c.Assert(err, IsNil)
-
-	dstFs := fixtures.ByTag("empty").One().DotGit()
-	url := dstFs.Root()
-
-	r, err := Open(sto, srcFs)
-	c.Assert(err, IsNil)
-
-	_, err = r.CreateRemote(&config.RemoteConfig{
-		Name: "myremote",
+	_, err = s.Repository.CreateRemote(&config.RemoteConfig{
+		Name: "test",
 		URL:  url,
 	})
 	c.Assert(err, IsNil)
 
-	err = r.Push(&PushOptions{RemoteName: "myremote"})
-	c.Assert(err, IsNil)
-
-	sto, err = filesystem.NewStorage(dstFs)
-	c.Assert(err, IsNil)
-	dstRepo, err := Open(sto, nil)
-	c.Assert(err, IsNil)
-
-	iter, err := sto.IterReferences()
-	c.Assert(err, IsNil)
-	err = iter.ForEach(func(ref *plumbing.Reference) error {
-		if !ref.IsBranch() {
-			return nil
-		}
-
-		dstRef, err := dstRepo.Reference(ref.Name(), true)
-		c.Assert(err, IsNil)
-		c.Assert(dstRef, DeepEquals, ref)
-
-		return nil
+	err = s.Repository.Push(&PushOptions{
+		RemoteName: "test",
 	})
 	c.Assert(err, IsNil)
+
+	AssertReferences(c, server, map[string]string{
+		"refs/heads/master": "6ecf0ef2c2dffb796033e5a02219af86ec6584e5",
+		"refs/heads/branch": "e8d3ffab552895c19b9fcf7aa264d277cde33881",
+	})
+
+	AssertReferences(c, s.Repository, map[string]string{
+		"refs/remotes/test/master": "6ecf0ef2c2dffb796033e5a02219af86ec6584e5",
+		"refs/remotes/test/branch": "e8d3ffab552895c19b9fcf7aa264d277cde33881",
+	})
+}
+
+func (s *RepositorySuite) TestPushDepth(c *C) {
+	url := c.MkDir()
+	server, err := PlainClone(url, true, &CloneOptions{
+		URL: fixtures.Basic().One().DotGit().Root(),
+	})
+
+	c.Assert(err, IsNil)
+
+	r, err := Clone(memory.NewStorage(), memfs.New(), &CloneOptions{
+		URL:   url,
+		Depth: 1,
+	})
+	c.Assert(err, IsNil)
+
+	err = util.WriteFile(r.wt, "foo", nil, 0755)
+	c.Assert(err, IsNil)
+
+	w, err := r.Worktree()
+	c.Assert(err, IsNil)
+
+	_, err = w.Add("foo")
+	c.Assert(err, IsNil)
+
+	hash, err := w.Commit("foo", &CommitOptions{
+		Author:    defaultSignature(),
+		Committer: defaultSignature(),
+	})
+	c.Assert(err, IsNil)
+
+	err = r.Push(&PushOptions{})
+	c.Assert(err, IsNil)
+
+	AssertReferences(c, server, map[string]string{
+		"refs/heads/master": hash.String(),
+	})
+
+	AssertReferences(c, r, map[string]string{
+		"refs/remotes/origin/master": hash.String(),
+	})
 }
 
 func (s *RepositorySuite) TestPushNonExistentRemote(c *C) {
